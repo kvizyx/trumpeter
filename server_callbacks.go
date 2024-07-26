@@ -1,20 +1,21 @@
 package wera
 
 type (
-	// OnConnect is invoking on new client connection.
+	// OnConnect invokes when new client connects to the server.
 	OnConnect = func(c Connection)
 
-	// OnLocalMessage is invoking on messages from local-connected clients except of control messages
+	// OnLocalMessage invokes on messages from instance-scoped clients except of control messages
 	// as they're handling internally.
 	OnLocalMessage = func(c Connection, msg []byte)
 
-	// OnPubSubMessage is invoking on messages from Pub-Sub.
+	// OnPubSubMessage invokes on messages from Pub-Sub.
 	OnPubSubMessage = func(msg []byte)
 
-	// OnDisconnect is invoking on disconnection of client from server initiated by either peer.
+	// OnDisconnect invokes when client disconnects from server.
 	OnDisconnect = func(c Connection)
 
-	// OnError is invoking on internal server errors (including connection close errors).
+	// OnError invokes on internal server errors (including connection close errors which
+	// you can detect by using ErrCloseConn error in conjunction with errors.Is).
 	OnError = func(c Connection, err error)
 )
 
