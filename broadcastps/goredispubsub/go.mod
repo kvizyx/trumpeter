@@ -3,7 +3,7 @@ module github.com/kvizyx/wera/broadcastps/goredispubsub
 go 1.22.5
 
 require (
-	github.com/kvizyx/wera v0.0.0-20240725140842-c488c30c8654
+	github.com/kvizyx/wera v0.0.0-20240726154458-6b37520da85c
 	github.com/redis/go-redis/v9 v9.6.1
 )
 
