@@ -14,7 +14,7 @@ type (
 	// OnDisconnect is invoking on disconnection of client from server initiated by either peer.
 	OnDisconnect = func(c Connection)
 
-	// OnError is invoking on server errors.
+	// OnError is invoking on internal server errors (including connection close errors).
 	OnError = func(c Connection, err error)
 )
 

@@ -1,12 +1,13 @@
 package wera
 
 import (
+	"net/http"
 	"time"
 )
 
 type ServerOption func(s *Server)
 
-// WithPubSubBroadcast enables broadcasting messages through PubSub mechanism.
+// WithPubSubBroadcast enables broadcasting messages through PubSub interface.
 // It may be helpful if you want to distribute broadcast-messages to multiple
 // subscribers (e.g. different server instances).
 func WithPubSubBroadcast(ps PubSub, channel string) ServerOption {
@@ -32,5 +33,15 @@ func WithPingInterval(interval time.Duration) ServerOption {
 func WithReadLimit(limit int64) ServerOption {
 	return func(s *Server) {
 		s.readLimit = limit
+	}
+}
+
+// WithUpgradeHeader sets an HTTP header that will be sent by server with upgrade response.
+// It may be helpful if you want to set client-cookie for example.
+//
+// By default, no header is sent.
+func WithUpgradeHeader(header http.Header) ServerOption {
+	return func(s *Server) {
+		s.upgradeHeader = header
 	}
 }

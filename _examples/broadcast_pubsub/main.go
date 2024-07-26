@@ -38,7 +38,7 @@ func main() {
 	server.OnLocalMessage(func(c wera.Connection, msg []byte) {
 		log.Printf("local message from %d: %s", c.ID(), string(msg))
 
-		if err := server.BroadcastGlobal(context.TODO(), msg); err != nil {
+		if err := server.BroadcastPubSub(context.TODO(), msg); err != nil {
 			log.Printf("broadcast error: %s", err)
 		}
 	})

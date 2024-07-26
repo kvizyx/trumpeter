@@ -2,7 +2,6 @@ package wera
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -16,34 +15,14 @@ const (
 	defaultReadLimit int64 = 1024 // 1KB
 )
 
-var (
-	ErrNoPubSub = errors.New("pub-sub implementation is not provided")
-)
-
-var expectedCloseErrors = []int{
-	websocket.CloseNormalClosure,
-	websocket.CloseGoingAway,
-	websocket.CloseProtocolError,
-	websocket.CloseUnsupportedData,
-	websocket.CloseNoStatusReceived,
-	websocket.CloseAbnormalClosure,
-	websocket.CloseInvalidFramePayloadData,
-	websocket.ClosePolicyViolation,
-	websocket.CloseMessageTooBig,
-	websocket.CloseMandatoryExtension,
-	websocket.CloseInternalServerErr,
-	websocket.CloseServiceRestart,
-	websocket.CloseTryAgainLater,
-	websocket.CloseTLSHandshake,
-}
-
 type Server struct {
-	Upgrader websocket.Upgrader
+	Upgrader      websocket.Upgrader
+	upgradeHeader http.Header
 
 	ps        PubSub
 	psChannel string
 
-	idOffset atomic.Uint64
+	idOffset atomic.Uint32
 
 	onConn       OnConnect
 	onLocalMsg   OnLocalMessage
@@ -52,7 +31,7 @@ type Server struct {
 	onErr        OnError
 
 	connections       map[connID]*Connection
-	connectionsLocker *sync.RWMutex
+	connectionsLocker sync.RWMutex
 
 	pingInterval time.Duration
 	readLimit    int64
@@ -68,12 +47,11 @@ func NewServer(opts ...ServerOption) *Server {
 	}
 
 	server := &Server{
-		Upgrader:          upgrader,
-		connections:       make(map[connID]*Connection),
-		connectionsLocker: &sync.RWMutex{},
-		pingInterval:      -1, // if ping interval not set, clients don't need to send pings
-		readLimit:         defaultReadLimit,
-		shutdown:          make(chan struct{}),
+		Upgrader:     upgrader,
+		connections:  make(map[connID]*Connection),
+		pingInterval: -1, // if ping interval not set, clients don't need to send pings
+		readLimit:    defaultReadLimit,
+		shutdown:     make(chan struct{}),
 	}
 
 	for _, opt := range opts {
@@ -85,8 +63,10 @@ func NewServer(opts ...ServerOption) *Server {
 	return server
 }
 
+// ServeHTTP is http-to-websocket upgrade handler. After upgrade connection will be
+// served by server.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	wsConn, err := s.Upgrader.Upgrade(w, r, nil)
+	wsConn, err := s.Upgrader.Upgrade(w, r, s.upgradeHeader)
 	if err != nil {
 		return
 	}
@@ -96,7 +76,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	wsConn.SetReadLimit(s.readLimit)
 	wsConn.SetCloseHandler(func(code int, reason string) error {
-		return s.handleConnClose(srvConn, code, reason)
+		err = s.handleConnClose(srvConn, code, reason)
+		if err != nil {
+			if s.onErr != nil {
+				s.onErr(srvConn, err)
+			}
+
+			return err
+		}
+
+		return nil
 	})
 
 	s.connectionsLocker.Lock()
@@ -110,6 +99,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Shutdown shutdowns server gracefully trying to close all active connections
+// with closing handshake.
 func (s *Server) Shutdown() {
 	s.connectionsLocker.RLock()
 	defer s.connectionsLocker.RUnlock()
@@ -117,30 +108,41 @@ func (s *Server) Shutdown() {
 	for _, conn := range s.connections {
 		err := conn.Close(websocket.CloseGoingAway, "server is shutting down")
 		if err != nil && s.onErr != nil {
-			s.onErr(*conn, err)
+			s.onErr(*conn, fmtCloseErr(err))
 		}
 	}
 
 	close(s.shutdown)
 }
 
-// BroadcastGlobal broadcasts message to pub-sub subscribers (including the current instance,
+// Connections returns number of connections on the server.
+func (s *Server) Connections() int {
+	s.connectionsLocker.RLock()
+	clen := len(s.connections)
+	s.connectionsLocker.RUnlock()
+
+	return clen
+}
+
+// BroadcastPubSub broadcasts message to PubSub subscribers (including the current instance,
 // which means that message will also be broadcast locally when pub-sub listener will get it)
 //
-// Works only with WithPubSubBroadcast setting.
-func (s *Server) BroadcastGlobal(ctx context.Context, message []byte) error {
+// Works only with WithPubSubBroadcast option.
+func (s *Server) BroadcastPubSub(ctx context.Context, message []byte) error {
 	if s.ps == nil {
 		return ErrNoPubSub
 	}
 
 	err := s.ps.Publish(ctx, s.psChannel, message)
 	if err != nil {
-		return fmt.Errorf("publish message: %w", err)
+		return fmt.Errorf("publish: %w", err)
 	}
 
 	return nil
 }
 
+// BroadcastLocalFilter broadcasts message to instance-scoped connections applying filter
+// function to each one. If filter returns false Connection will be skipped.
 func (s *Server) BroadcastLocalFilter(message []byte, filter func(c Connection) bool) {
 	closeQueue := make([]*Connection, 0)
 
@@ -168,18 +170,18 @@ func (s *Server) BroadcastLocalFilter(message []byte, filter func(c Connection) 
 
 			err := conn.Close(websocket.CloseNormalClosure, "unreachable connection")
 			if err != nil && s.onErr != nil {
-				s.onErr(*conn, err)
+				s.onErr(*conn, fmtCloseErr(err))
 			}
 		}
 	}()
 }
 
-// BroadcastLocal broadcasts message to instance scoped connections without any filter.
+// BroadcastLocal broadcasts message to instance-scoped connections without any filter.
 func (s *Server) BroadcastLocal(message []byte) {
 	s.blNoFilter(message)
 }
 
-// BroadcastLocalOthers broadcasts message to instance scoped connections
+// BroadcastLocalOthers broadcasts message to instance-scoped connections
 // except one with provided ID.
 func (s *Server) BroadcastLocalOthers(message []byte, connID connID) {
 	s.BroadcastLocalFilter(message, func(c Connection) bool {
@@ -213,7 +215,7 @@ func (s *Server) listenPubSubBroadcasts() {
 		case <-s.shutdown:
 			return
 		case msg := <-messages:
-			s.onPubSubMsg(msg.Data)
+			go s.onPubSubMsg(msg.Data)
 			s.BroadcastLocal(msg.Data)
 		}
 	}
@@ -234,7 +236,10 @@ func (s *Server) serveConn(conn Connection) {
 		}
 
 		// force connection to close
-		_ = conn.wsConn.Close()
+		err := conn.wsConn.Close()
+		if err != nil && s.onErr != nil {
+			s.onErr(conn, fmtCloseErr(err))
+		}
 	}()
 
 	if s.pingInterval > 0 {
@@ -257,13 +262,13 @@ func (s *Server) serveConn(conn Connection) {
 
 		switch mt {
 		case websocket.TextMessage:
-			s.onLocalMsg(conn, data)
+			go s.onLocalMsg(conn, data)
 
 		case websocket.PingMessage:
 			err = conn.send(true, websocket.PongMessage, nil, -1)
 			if err != nil {
 				if s.onErr != nil {
-					s.onErr(conn, err)
+					s.onErr(conn, fmtCloseErr(err))
 				}
 				return
 			}
@@ -285,16 +290,13 @@ func (s *Server) handleConnClose(conn Connection, code int, reason string) error
 	closeMsg := websocket.FormatCloseMessage(code, reason)
 	err := conn.send(true, websocket.CloseMessage, closeMsg, -1)
 	if err != nil {
-		if s.onErr != nil {
-			s.onErr(conn, err)
-		}
 		return fmt.Errorf("send close ack: %w", err)
 	}
 
 	conn.setState(connStateClosed)
 	err = conn.wsConn.Close()
-	if err != nil && s.onErr != nil {
-		s.onErr(conn, err)
+	if err != nil {
+		return fmtCloseErr(err)
 	}
 
 	return nil
@@ -314,8 +316,8 @@ func (s *Server) startPingChecker(conn Connection) {
 			}
 
 			err := conn.Close(websocket.CloseNormalClosure, "ping not received")
-			if err != nil && s.onErr != nil {
-				s.onErr(conn, err)
+			if s.onErr != nil {
+				s.onErr(conn, fmtCloseErr(err))
 			}
 			return
 		}
@@ -323,7 +325,7 @@ func (s *Server) startPingChecker(conn Connection) {
 }
 
 // getConnID increase idOffset by one and returns new id value.
-func (s *Server) getConnID() (newID uint64) {
+func (s *Server) getConnID() (newID uint32) {
 	newID = s.idOffset.Add(1)
 	return newID
 }
